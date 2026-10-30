@@ -1,0 +1,10 @@
+{
+  "project_id": 1,
+  "name": "Finance AI App",
+  "stack": {
+    "frontend": "nextjs",
+    "backend": "express",
+    "database": "mysql"
+  },
+  "status": "initialized"
+}

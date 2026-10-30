@@ -1,0 +1,568 @@
+import json
+import re
+
+from agents.prompts.code_generator import (
+    CODE_GENERATOR_SYSTEM_PROMPT,
+)
+
+from agents.providers.factory import (
+    get_llm_provider,
+)
+
+from agents.schemas.code_generation import (
+    CodeGenerationResult,
+)
+
+
+class CodeGeneratorService:
+
+    MAX_ATTEMPTS = 3
+
+    def __init__(self):
+        self.llm = get_llm_provider()
+
+    def generate(
+        self,
+        *,
+        task,
+        application_specification: dict,
+        file_tree: list[str],
+        relevant_files: dict[str, str],
+    ) -> CodeGenerationResult:
+
+        payload = {
+            "application_specification": application_specification,
+            "task": {
+                "id": task.id,
+                "task_number": task.task_number,
+                "type": task.task_type,
+                "title": task.title,
+                "description": task.description,
+                "files": task.files,
+                "dependencies": task.dependencies,
+            },
+            "project_file_tree": file_tree,
+            "relevant_files": relevant_files,
+        }
+
+        last_error: Exception | None = None
+
+        for _ in range(self.MAX_ATTEMPTS):
+            try:
+                return self._generate(
+                    payload,
+                    previous_error=(str(last_error) if last_error else None),
+                )
+
+            except ValueError as exc:
+                last_error = exc
+
+        raise ValueError(
+            "Code generation failed after "
+            f"{self.MAX_ATTEMPTS} attempts. "
+            f"Last error: {last_error}"
+        ) from last_error
+
+    def _generate(
+        self,
+        payload: dict,
+        previous_error: str | None = None,
+    ) -> CodeGenerationResult:
+
+        messages = [
+            {
+                "role": "system",
+                "content": CODE_GENERATOR_SYSTEM_PROMPT,
+            },
+            {
+                "role": "user",
+                "content": json.dumps(
+                    payload,
+                    indent=2,
+                ),
+            },
+        ]
+
+        if previous_error:
+            messages.append(
+                {
+                    "role": "user",
+                    "content": (
+                        "Your previous output was rejected.\n\n"
+                        f"Reason:\n"
+                        f"{previous_error[:3000]}\n\n"
+                        "Regenerate the task correctly.\n\n"
+                        "STRICT REQUIREMENTS:\n"
+                        '- "summary" MUST be a string.\n'
+                        '- "operations" MUST be an array.\n'
+                        "- Every write_file operation must include "
+                        '"operation", "path", and "content".\n'
+                        "- Do NOT import PrismaClient from "
+                        "@prisma/client.\n"
+                        "- Do NOT instantiate PrismaClient.\n"
+                        '- Do NOT use "@/..." imports.\n'
+                        "- Do NOT import individual generated "
+                        "Prisma model files.\n"
+                        "- Reuse the existing shared Prisma "
+                        "instance.\n"
+                        "- Use existing project files and "
+                        "conventions.\n"
+                        "- Relative NodeNext imports must "
+                        "include .js.\n"
+                        "- Return ONLY valid JSON."
+                        "- You MUST create every file listed in task['files'].\n"
+                        "- Do not return an empty operations array when task files are required.\n"
+                        "- Each required task file must have a write_file operation.\n"
+                    ),
+                }
+            )
+
+        response = self.llm.generate(
+            messages,
+            temperature=0.1,
+            json_schema=(CodeGenerationResult.model_json_schema()),
+        )
+
+        if not response.content or not response.content.strip():
+            raise ValueError("Code generator returned " "an empty response.")
+
+        data = self._parse_json(response.content)
+
+        try:
+            result = CodeGenerationResult.model_validate(data)
+
+        except Exception as exc:
+            raise ValueError(
+                "Generated JSON did not match "
+                "CodeGenerationResult schema.\n"
+                f"Validation error: {exc}\n\n"
+                f"Raw response:\n"
+                f"{response.content[:4000]}"
+            ) from exc
+
+        # Normalize generated frontend directives before architecture validation.
+        for operation in result.operations:
+            if operation.operation != "write_file":
+                continue
+
+            operation.content = self._normalize_client_directive(
+                operation.path,
+                operation.content or "",
+            )
+
+        self._validate_generated_architecture(
+            result,
+            allowed_paths=set(payload["task"]["files"]),
+            existing_paths=set(payload["project_file_tree"]),
+        )
+
+        return result
+
+    def _parse_json(
+        self,
+        content: str,
+    ) -> dict:
+
+        cleaned = content.strip()
+
+        if cleaned.startswith("```json"):
+            cleaned = cleaned[7:]
+
+        elif cleaned.startswith("```"):
+            cleaned = cleaned[3:]
+
+        if cleaned.endswith("```"):
+            cleaned = cleaned[:-3]
+
+        cleaned = cleaned.strip()
+
+        try:
+            data = json.loads(cleaned)
+
+        except json.JSONDecodeError as exc:
+            raise ValueError(
+                "Qwen returned invalid "
+                "code-generation JSON.\n\n"
+                f"Raw output:\n{content}"
+            ) from exc
+
+        if not isinstance(
+            data,
+            dict,
+        ):
+            raise ValueError("Code-generation output " "must be a JSON object.")
+
+        return data
+
+
+    def _validate_frontend_runtime(self, path: str, content: str) -> list[str]:
+        violations = []
+
+        if not path.startswith("frontend/"):
+            return violations
+
+        client_hooks = (
+            "useState",
+            "useEffect",
+            "useReducer",
+            "useRef",
+            "useContext",
+            "useLayoutEffect",
+        )
+
+        uses_client_hooks = any(
+            re.search(rf"\b{hook}\b", content)
+            for hook in client_hooks
+        )
+
+        # Validate client directive for components using React hooks.
+        if uses_client_hooks:
+            stripped = content.lstrip("\ufeff \t\r\n")
+
+            valid_directive = (
+                stripped.startswith("'use client';")
+                or stripped.startswith('"use client";')
+                or stripped.startswith("'use client'\n")
+                or stripped.startswith('"use client"\n')
+            )
+
+            if not valid_directive:
+                violations.append(
+                    f"{path}: React client hooks are used, but the file "
+                    "does not begin with a valid quoted 'use client' directive. "
+                    "The first statement must be 'use client';"
+                )
+
+        # Prevent browser storage access during state initialization.
+        unsafe_storage_initializer = re.search(
+            r"useState\s*\(\s*(?:\(\s*\)\s*=>\s*)?"
+            r"[^;]*\b(?:localStorage|sessionStorage)\b",
+            content,
+            re.DOTALL,
+        )
+
+        if unsafe_storage_initializer:
+            violations.append(
+                f"{path}: localStorage/sessionStorage must not be accessed "
+                "inside a useState initializer. Initialize with a server-safe "
+                "default and restore storage inside useEffect."
+            )
+
+        return violations
+
+
+    def _normalize_client_directive(self, path: str, content: str) -> str:
+        """Fix a malformed or missing client directive when client features are used."""
+        normalized_path = path.replace("\\", "/").lstrip("./")
+
+        if not (
+            normalized_path.startswith("frontend/app/")
+            and normalized_path.endswith((".tsx", ".jsx"))
+        ):
+            return content
+
+        # Do not add the directive to files that don't need client-side behavior.
+        client_features = (
+            "useState",
+            "useEffect",
+            "useReducer",
+            "useRef",
+            "useCallback",
+            "useMemo",
+            "useContext",
+            "useLayoutEffect",
+            "localStorage",
+            "sessionStorage",
+        )
+
+        has_client_features = any(
+            feature in content for feature in client_features
+        ) or any(
+            event in content
+            for event in (
+                "onClick=",
+                "onChange=",
+                "onSubmit=",
+                "onInput=",
+            )
+        )
+
+        if not has_client_features:
+            return content
+
+        # A valid directive already exists as the first statement.
+        stripped = content.lstrip("\ufeff \t\r\n")
+
+        if (
+            stripped.startswith("'use client';")
+            or stripped.startswith('"use client";')
+            or stripped.startswith("'use client'")
+            or stripped.startswith('"use client"')
+        ):
+            return content
+
+        # Repair the common unquoted directive.
+        lines = content.splitlines(keepends=True)
+
+        if lines and lines[0].strip() in {"use client", "use client;"}:
+            lines[0] = "'use client';" + (
+                "\n" if lines[0].endswith(("\n", "\r")) else ""
+            )
+            return "".join(lines)
+
+        # Insert the directive before imports and other statements.
+        return "'use client';\n\n" + content.lstrip("\ufeff \t\r\n")
+
+
+    def _validate_generated_architecture(
+        self,
+        result: CodeGenerationResult,
+        *,
+        allowed_paths: set[str],
+        existing_paths: set[str],
+    ) -> None:
+
+        violations: list[str] = []
+
+        normalize_path = lambda value: value.strip().replace("\\", "/").strip("/")
+
+        normalized_allowed_paths = {
+            normalize_path(p) for p in allowed_paths
+        }
+
+        normalized_existing_paths = {
+            normalize_path(p) for p in existing_paths
+        }
+
+
+        for operation in result.operations:
+
+            path = normalize_path(operation.path)
+
+            # -----------------------------------------
+            # Strict task file scope
+            # -----------------------------------------
+
+            if path not in normalized_allowed_paths:
+                violations.append(
+                    f"{path}: file is outside the "
+                    "current task scope. "
+                    f"Allowed files: "
+                    f"{sorted(normalized_allowed_paths)}"
+                )
+                continue
+
+            if operation.operation != "write_file":
+                continue
+
+            path = operation.path
+            content = operation.content or ""
+
+            normalized = content.replace(
+                "'",
+                '"',
+            )
+
+            # =================================================
+            # Backend validation
+            # =================================================
+
+            if path.startswith("backend/src/"):
+
+                relative_imports = re.findall(
+                    r'from\s+["\'](\.{1,2}/[^"\']+)["\']',
+                    content,
+                )
+
+                for import_path in relative_imports:
+
+                    if import_path.endswith(".ts"):
+                        violations.append(
+                            f"{path}: relative NodeNext import "
+                            f"{import_path!r} must not end in .ts. "
+                            "Use the emitted .js extension."
+                        )
+
+                    elif not (
+                        import_path.endswith(".js")
+                        or import_path.endswith(".json")
+                    ):
+                        violations.append(
+                            f"{path}: relative NodeNext import "
+                            f"{import_path!r} must include "
+                            "the .js extension."
+                        )
+
+                if (
+                    '"@prisma/client"' in normalized
+                    and "PrismaClient" in normalized
+                ):
+                    violations.append(
+                        f"{path}: importing PrismaClient "
+                        "from @prisma/client is forbidden. "
+                        "Reuse the shared prisma instance."
+                    )
+
+                if "new PrismaClient(" in content:
+                    violations.append(
+                        f"{path}: new PrismaClient() "
+                        "is forbidden."
+                    )
+
+                if 'from "@/' in normalized:
+                    violations.append(
+                        f"{path}: @/ path aliases "
+                        "are forbidden."
+                    )
+
+                if (
+                    "generated/prisma/models/"
+                    in content
+                ):
+                    violations.append(
+                        f"{path}: importing individual "
+                        "generated Prisma model files "
+                        "is forbidden."
+                    )
+
+                if (
+                    "backend/src/generated/prisma"
+                    in content
+                ):
+                    violations.append(
+                        f"{path}: do not import Prisma "
+                        "using project-root absolute-style "
+                        "paths."
+                    )
+
+            # =================================================
+            # Frontend validation
+            # =================================================
+
+            if path.startswith("frontend/"):
+
+                violations.extend(
+                    self._validate_frontend_runtime(path, content)
+                )
+
+                # App Router only
+                if path.startswith(
+                    "frontend/pages/"
+                ):
+                    violations.append(
+                        f"{path}: Pages Router is forbidden. "
+                        "Use frontend/app/ with App Router."
+                    )
+
+                if "/pages/" in path:
+                    violations.append(
+                        f"{path}: Pages Router paths "
+                        "are forbidden."
+                    )
+
+                # Do not invent aliases
+                if 'from "@/' in normalized:
+                    violations.append(
+                        f"{path}: @/ aliases are forbidden "
+                        "unless they are already configured "
+                        "and used by the existing project."
+                    )
+
+                # Prevent frontend task from creating backend files
+                if (
+                    path.startswith("frontend/")
+                    and "backend/src/" in content
+                ):
+                    violations.append(
+                        f"{path}: frontend source should not "
+                        "import backend source files directly."
+                    )
+
+                # Pages must use App Router structure
+                if (
+                    path.endswith("page.tsx")
+                    and not path.startswith(
+                        "frontend/app/"
+                    )
+                ):
+                    violations.append(
+                        f"{path}: Next.js pages must live "
+                        "under frontend/app/."
+                    )
+
+            # =================================================
+            # General project rules
+            # =================================================
+
+            if path.startswith(
+                "frontend/node_modules/"
+            ):
+                violations.append(
+                    f"{path}: generated code must not "
+                    "modify node_modules."
+                )
+
+            if path.startswith(
+                "backend/node_modules/"
+            ):
+                violations.append(
+                    f"{path}: generated code must not "
+                    "modify node_modules."
+                )
+
+            if "/.next/" in path:
+                violations.append(
+                    f"{path}: generated code must not "
+                    "modify .next."
+                )
+
+            if "/dist/" in path:
+                violations.append(
+                    f"{path}: generated code must not "
+                    "write compiled dist files."
+                )
+
+        generated_paths = {
+            normalize_path(operation.path)
+            for operation in result.operations
+            if operation.operation == "write_file"
+        }
+
+        required_new_files = (
+            allowed_paths - existing_paths
+        )
+
+
+        missing_required_files = (
+            allowed_paths - generated_paths
+        )
+
+        write_operations = [
+            operation
+            for operation in result.operations
+            if operation.operation == "write_file"
+        ]
+
+        if missing_required_files:
+            violations.append(
+                "Generator did not create required new "
+                "task files. "
+                f"Missing: {sorted(missing_required_files)}"
+            )
+
+        if violations:
+            raise ValueError(
+                "ARCHITECTURE_VIOLATION:\n"
+                + "\n".join(
+                    violations
+                )
+            )
+
+        if not write_operations:
+            raise ValueError(
+                "ARCHITECTURE_VIOLATION:\n"
+                "Generator returned no write_file "
+                "operations for the current task."
+            )
+
+        

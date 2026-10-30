@@ -1,0 +1,67 @@
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "mysql"
+}
+
+model User {
+  id           Int        @id @default(autoincrement())
+  email        String     @unique
+  passwordHash String
+  createdAt    DateTime   @default(now())
+  incomes      Income[]
+  expenses     Expense[]
+  categories   Category[]
+  budgets      Budget[]
+}
+
+model Income {
+  id          Int      @id @default(autoincrement())
+  userId      Int
+  categoryId  Int
+  amount      Decimal
+  date        DateTime
+  description String
+  user        User     @relation(fields: [userId], references: [id])
+  category    Category @relation(fields: [categoryId], references: [id])
+}
+
+model Expense {
+  id          Int      @id @default(autoincrement())
+  userId      Int
+  categoryId  Int
+  amount      Decimal
+  date        DateTime
+  description String
+  user        User     @relation(fields: [userId], references: [id])
+  category    Category @relation(fields: [categoryId], references: [id])
+}
+
+model Category {
+  id       Int       @id @default(autoincrement())
+  name     String    @unique
+  type     EnumType // 'income' or 'expense'
+  userId   Int
+  user     User      @relation(fields: [userId], references: [id])
+  incomes  Income[]
+  expenses Expense[]
+  budgets  Budget[]
+}
+
+model Budget {
+  id           Int      @id @default(autoincrement())
+  userId       Int
+  categoryId   Int
+  budgetAmount Decimal
+  month        DateTime @db.Date
+  user         User     @relation(fields: [userId], references: [id])
+  category     Category @relation(fields: [categoryId], references: [id])
+}
+
+enum EnumType {
+  income
+  expense
+}

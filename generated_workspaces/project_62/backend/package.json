@@ -1,0 +1,25 @@
+{
+  "name": "generated-backend",
+  "private": true,
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "build": "tsc",
+    "start": "node dist/server.js",
+    "prisma:generate": "prisma generate",
+    "prisma:validate": "prisma validate"
+  },
+  "dependencies": {
+    "@prisma/client": "6.19.0",
+    "cors": "latest",
+    "dotenv": "latest",
+    "express": "latest"
+  },
+  "devDependencies": {
+    "@types/cors": "latest",
+    "@types/express": "latest",
+    "@types/node": "latest",
+    "prisma": "6.19.0",
+    "tsx": "latest",
+    "typescript": "latest"
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "name": "next-express-mysql",
+  "version": "1.0.0",
+  "stack": {
+    "frontend": "nextjs",
+    "backend": "express",
+    "database": "mysql",
+    "language": "typescript"
+  }
+}

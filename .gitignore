@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Secrets
+.env
+.env.*
+!.env.example
+
+# Node
+node_modules/
+.next/
+dist/
+
+# Logs
+*.log
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Generated workspace dependencies/builds
+generated_workspaces/**/node_modules/
+generated_workspaces/**/.next/
+generated_workspaces/**/dist/
+
+# Prompt2Web frontend dependencies/builds
+prompt2web_frontend/node_modules/
+prompt2web_frontend/.next/

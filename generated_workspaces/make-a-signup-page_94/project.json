@@ -1,0 +1,13 @@
+{
+  "project_id": 94,
+  "name": "make a signup page",
+  "generation_mode": "frontend_page",
+  "stack": {
+    "frontend": "nextjs",
+    "backend": "none",
+    "database": "none",
+    "orm": "none",
+    "language": "typescript"
+  },
+  "status": "initialized"
+}

@@ -1,0 +1,10 @@
+{
+  "project_id": 81,
+  "name": "create a counter app",
+  "stack": {
+    "frontend": "nextjs",
+    "backend": "express",
+    "database": "mysql"
+  },
+  "status": "initialized"
+}

@@ -1,0 +1,10 @@
+{
+  "project_id": 62,
+  "name": "Create a simple counter web application using Next.js for th...",
+  "stack": {
+    "frontend": "nextjs",
+    "backend": "express",
+    "database": "mysql"
+  },
+  "status": "initialized"
+}
